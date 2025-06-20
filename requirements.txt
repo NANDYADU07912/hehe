@@ -1,0 +1,14 @@
+apscheduler
+bing-image-urls
+gTTS
+googlesearch-python
+httpx[http2]
+pyfiglet
+requests
+lexica-api
+SafoneAPI
+nekos.py
+telegraph
+uuid
+git+https://github.com/TheChampu/TheAPI
+git+https://github.com/TheChampu/ChampuAPI
