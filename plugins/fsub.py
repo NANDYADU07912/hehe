@@ -53,52 +53,65 @@ async def set_forcesub(client: Client, message: Message):
     except Exception as e:
         await message.reply_text("**🚫 Failed to set force subscription.**")
         
-# Monitor channel member updates for instant unmute
-@app.on_chat_member_updated()
-async def on_channel_member_updated(client: Client, chat_member_updated):
-    # Get all groups where this channel is set for force subscription
-    channel_id = chat_member_updated.chat.id
-    user_id = chat_member_updated.from_user.id
+# Handle refresh button callback
+@app.on_callback_query(filters.regex(r"refresh_fsub_(\d+)_(\d+)"))
+async def refresh_fsub_check(client: Client, callback_query: CallbackQuery):
+    # Extract chat_id and user_id from callback data
+    match = callback_query.matches[0]
+    chat_id = int(match.group(1))
+    user_id = int(match.group(2))
     
-    # Check if this update is from a channel (not a group)
-    if chat_member_updated.chat.type not in ["channel", "supergroup"]:
+    # Only allow the muted user to use the refresh button
+    if callback_query.from_user.id != user_id:
+        await callback_query.answer("❌ Only the muted user can use this button!", show_alert=True)
         return
     
-    # Find all groups that have this channel as force subscription
-    groups_with_forcesub = forcesub_collection.find({"channel_id": channel_id})
+    # Get force subscription data
+    forcesub_data = forcesub_collection.find_one({"chat_id": chat_id})
+    if not forcesub_data:
+        await callback_query.answer("❌ Force subscription not found!", show_alert=True)
+        return
     
-    new_member = chat_member_updated.new_chat_member
-    if new_member and new_member.status == "member":
-        # User joined the channel, unmute them in all groups
-        for group_data in groups_with_forcesub:
-            group_id = group_data["chat_id"]
-            channel_username = group_data["channel_username"]
+    channel_id = forcesub_data["channel_id"]
+    channel_username = forcesub_data["channel_username"]
+    
+    try:
+        # Check if user has joined the channel
+        user_member = await app.get_chat_member(channel_id, user_id)
+        if user_member and user_member.status == "member":
+            # User has joined! Unmute them
+            user_message_collection.delete_one({"chat_id": chat_id, "user_id": user_id})
             
-            try:
-                # Check if user is muted in this group
-                user_data = user_message_collection.find_one({"chat_id": group_id, "user_id": user_id})
-                if user_data:
-                    # Remove user from message tracking
-                    user_message_collection.delete_one({"chat_id": group_id, "user_id": user_id})
-                    
-                    # Unmute the user
-                    await client.restrict_chat_member(
-                        group_id,
-                        user_id,
-                        permissions=ChatPermissions(
-                            can_send_messages=True,
-                            can_send_media_messages=True,
-                            can_send_other_messages=True,
-                            can_add_web_page_previews=True
-                        )
-                    )
-                    await client.send_message(
-                        group_id,
-                        f"**🎉 {chat_member_updated.from_user.mention}, you have been unmuted because you joined the [channel](https://t.me/{channel_username}).**",
-                        disable_web_page_preview=True
-                    )
-            except Exception as e:
-                print(f"Error unmuting user in group {group_id}: {e}")
+            # Unmute the user
+            await client.restrict_chat_member(
+                chat_id,
+                user_id,
+                permissions=ChatPermissions(
+                    can_send_messages=True,
+                    can_send_media_messages=True,
+                    can_send_other_messages=True,
+                    can_add_web_page_previews=True
+                )
+            )
+            
+            # Delete the mute message and send success message
+            await callback_query.message.delete()
+            await client.send_message(
+                chat_id,
+                f"**🎉 {callback_query.from_user.mention}, you have been unmuted because you joined the [channel](https://t.me/{channel_username}).**",
+                disable_web_page_preview=True
+            )
+            await callback_query.answer("✅ You have been unmuted successfully!", show_alert=True)
+        else:
+            # User hasn't joined yet
+            await callback_query.answer("❌ You haven't joined the channel yet! Please join first.", show_alert=True)
+            
+    except UserNotParticipant:
+        # User is not a member of the channel
+        await callback_query.answer("❌ You haven't joined the channel yet! Please join first.", show_alert=True)
+    except Exception as e:
+        await callback_query.answer("❌ Error checking membership!", show_alert=True)
+        print(f"Error in refresh check: {e}")
 
 @app.on_chat_member_updated()
 async def on_group_member_join(client: Client, chat_member_updated):
@@ -190,9 +203,17 @@ async def check_forcesub(client: Client, message: Message):
                             user_id,
                             permissions=ChatPermissions(can_send_messages=False)
                         )
+                        
+                        # Create refresh button - only the muted user can use it
+                        refresh_button = InlineKeyboardMarkup([
+                            [InlineKeyboardButton("🔄 Refresh (Check if Joined)", callback_data=f"refresh_fsub_{chat_id}_{user_id}")],
+                            [InlineKeyboardButton("๏ ᴊᴏɪɴ ᴄʜᴀɴɴᴇʟ ๏", url=f"https://t.me/{channel_username}")]
+                        ])
+                        
                         await client.send_message(
                             chat_id,
-                            f"**🚫 {message.from_user.mention}, you have been muted because you didn't join the [channel](https://t.me/{channel_username}) after 3 messages.**",
+                            f"**🚫 {message.from_user.mention}, you have been muted because you didn't join the [channel](https://t.me/{channel_username}) after 3 messages.**\n\n**💡 After joining the channel, click the refresh button below to get unmuted instantly!**",
+                            reply_markup=refresh_button,
                             disable_web_page_preview=True
                         )
                     except Exception as e:
