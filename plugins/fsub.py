@@ -53,36 +53,38 @@ async def set_forcesub(client: Client, message: Message):
     except Exception as e:
         await message.reply_text("**🚫 Failed to set force subscription.**")
         
-# Handle refresh button callback
+# Handle refresh button callback - FIXED VERSION
 @app.on_callback_query(filters.regex(r"refresh_fsub_(\d+)_(\d+)"))
 async def refresh_fsub_check(client: Client, callback_query: CallbackQuery):
-    # Extract chat_id and user_id from callback data
-    match = callback_query.matches[0]
-    chat_id = int(match.group(1))
-    user_id = int(match.group(2))
-    
-    # Only allow the muted user to use the refresh button
-    if callback_query.from_user.id != user_id:
-        await callback_query.answer("❌ Only the muted user can use this button!", show_alert=True)
-        return
-    
-    # Get force subscription data
-    forcesub_data = forcesub_collection.find_one({"chat_id": chat_id})
-    if not forcesub_data:
-        await callback_query.answer("❌ Force subscription not found!", show_alert=True)
-        return
-    
-    channel_id = forcesub_data["channel_id"]
-    channel_username = forcesub_data["channel_username"]
-    
     try:
+        # Extract chat_id and user_id from callback data
+        match = callback_query.matches[0]
+        chat_id = int(match.group(1))
+        user_id = int(match.group(2))
+        
+        # Only allow the muted user to use the refresh button
+        if callback_query.from_user.id != user_id:
+            await callback_query.answer("❌ Only the muted user can use this button!", show_alert=True)
+            return
+        
+        # Get force subscription data
+        forcesub_data = forcesub_collection.find_one({"chat_id": chat_id})
+        if not forcesub_data:
+            await callback_query.answer("❌ Force subscription not found!", show_alert=True)
+            return
+        
+        channel_id = forcesub_data["channel_id"]
+        channel_username = forcesub_data["channel_username"]
+        
         # Check if user has joined the channel
-        user_member = await app.get_chat_member(channel_id, user_id)
-        if user_member and user_member.status == "member":
-            # User has joined! Unmute them
+        user_member = await client.get_chat_member(channel_id, user_id)
+        
+        # Check if user is actually a member (not banned/kicked)
+        if user_member.status in ["member", "administrator", "creator"]:
+            # User has joined! Remove from tracking and unmute
             user_message_collection.delete_one({"chat_id": chat_id, "user_id": user_id})
             
-            # Unmute the user
+            # Unmute the user with full permissions
             await client.restrict_chat_member(
                 chat_id,
                 user_id,
@@ -90,20 +92,30 @@ async def refresh_fsub_check(client: Client, callback_query: CallbackQuery):
                     can_send_messages=True,
                     can_send_media_messages=True,
                     can_send_other_messages=True,
-                    can_add_web_page_previews=True
+                    can_add_web_page_previews=True,
+                    can_send_polls=True,
+                    can_change_info=False,
+                    can_invite_users=True,
+                    can_pin_messages=False
                 )
             )
             
-            # Delete the mute message and send success message
-            await callback_query.message.delete()
-            await client.send_message(
-                chat_id,
-                f"**🎉 {callback_query.from_user.mention}, you have been unmuted because you joined the [channel](https://t.me/{channel_username}).**",
+            # Edit the message to show success
+            await callback_query.message.edit_text(
+                f"**✅ {callback_query.from_user.mention}, you have been unmuted successfully!**\n\n**🎉 Thank you for joining the [channel](https://t.me/{channel_username}).**",
                 disable_web_page_preview=True
             )
+            
             await callback_query.answer("✅ You have been unmuted successfully!", show_alert=True)
+            
+            # Delete the message after 5 seconds
+            await asyncio.sleep(5)
+            try:
+                await callback_query.message.delete()
+            except:
+                pass
         else:
-            # User hasn't joined yet
+            # User hasn't joined or is banned/kicked
             await callback_query.answer("❌ You haven't joined the channel yet! Please join first.", show_alert=True)
             
     except UserNotParticipant:
@@ -173,7 +185,7 @@ async def check_forcesub(client: Client, message: Message):
 
     try:
         user_member = await app.get_chat_member(channel_id, user_id)
-        if user_member:
+        if user_member and user_member.status in ["member", "administrator", "creator"]:
             # User is a member, remove from tracking if exists
             user_message_collection.delete_one({"chat_id": chat_id, "user_id": user_id})
             return True
@@ -201,13 +213,19 @@ async def check_forcesub(client: Client, message: Message):
                         await client.restrict_chat_member(
                             chat_id,
                             user_id,
-                            permissions=ChatPermissions(can_send_messages=False)
+                            permissions=ChatPermissions(
+                                can_send_messages=False,
+                                can_send_media_messages=False,
+                                can_send_other_messages=False,
+                                can_add_web_page_previews=False
+                            )
                         )
                         
-                        # Create refresh button - only the muted user can use it
+                        # Create refresh button - FIXED callback data format
                         refresh_button = InlineKeyboardMarkup([
                             [InlineKeyboardButton("🔄 Refresh (Check if Joined)", callback_data=f"refresh_fsub_{chat_id}_{user_id}")],
-                            [InlineKeyboardButton("๏ ᴊᴏɪɴ ᴄʜᴀɴɴᴇʟ ๏", url=f"https://t.me/{channel_username}")]
+                            [InlineKeyboardButton("๏ ᴊᴏɪɴ ᴄʜᴀɴɴᴇʟ ๏", url=f"https://t.me/{channel_username}")],
+                            [InlineKeyboardButton("❌ Close", callback_data="close_force_sub")]
                         ])
                         
                         await client.send_message(
@@ -225,13 +243,21 @@ async def check_forcesub(client: Client, message: Message):
                     if channel_username:
                         channel_url = f"https://t.me/{channel_username}"
                     else:
-                        invite_link = await app.export_chat_invite_link(channel_id)
-                        channel_url = invite_link
+                        try:
+                            invite_link = await app.export_chat_invite_link(channel_id)
+                            channel_url = invite_link
+                        except:
+                            channel_url = f"https://t.me/c/{str(channel_id)[4:]}"
+                    
+                    close_button = InlineKeyboardMarkup([
+                        [InlineKeyboardButton("๏ ᴊᴏɪɴ ᴄʜᴀɴɴᴇʟ ๏", url=channel_url)],
+                        [InlineKeyboardButton("❌ Close", callback_data="close_force_sub")]
+                    ])
                     
                     await message.reply_photo(
                         photo="https://envs.sh/Tn_.jpg",
                         caption=(f"**👋 ʜᴇʟʟᴏ {message.from_user.mention},**\n\n**ʏᴏᴜ ɴᴇᴇᴅ ᴛᴏ ᴊᴏɪɴ ᴛʜᴇ [ᴄʜᴀɴɴᴇʟ]({channel_url}) ᴛᴏ sᴇɴᴅ ᴍᴇssᴀɢᴇs ɪɴ ᴛʜɪs ɢʀᴏᴜᴘ.**\n\n**⚠️ ᴡᴀʀɴɪɴɢ: {remaining_messages} ᴍᴇssᴀɢᴇs ʟᴇғᴛ ʙᴇғᴏʀᴇ ᴍᴜᴛᴇ!**"),
-                        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("๏ ᴊᴏɪɴ ᴄʜᴀɴɴᴇʟ ๏", url=channel_url)]]),
+                        reply_markup=close_button,
                     )
                     await asyncio.sleep(1)
                 
@@ -247,13 +273,21 @@ async def check_forcesub(client: Client, message: Message):
             if channel_username:
                 channel_url = f"https://t.me/{channel_username}"
             else:
-                invite_link = await app.export_chat_invite_link(channel_id)
-                channel_url = invite_link
+                try:
+                    invite_link = await app.export_chat_invite_link(channel_id)
+                    channel_url = invite_link
+                except:
+                    channel_url = f"https://t.me/c/{str(channel_id)[4:]}"
+            
+            close_button = InlineKeyboardMarkup([
+                [InlineKeyboardButton("๏ ᴊᴏɪɴ ᴄʜᴀɴɴᴇʟ ๏", url=channel_url)],
+                [InlineKeyboardButton("❌ Close", callback_data="close_force_sub")]
+            ])
             
             await message.reply_photo(
                 photo="https://envs.sh/Tn_.jpg",
                 caption=(f"**👋 ʜᴇʟʟᴏ {message.from_user.mention},**\n\n**ʏᴏᴜ ɴᴇᴇᴅ ᴛᴏ ᴊᴏɪɴ ᴛʜᴇ [ᴄʜᴀɴɴᴇʟ]({channel_url}) ᴛᴏ sᴇɴᴅ ᴍᴇssᴀɢᴇs ɪɴ ᴛʜɪs ɢʀᴏᴜᴘ.**\n\n**⚠️ ᴡᴀʀɴɪɴɢ: 2 ᴍᴇssᴀɢᴇs ʟᴇғᴛ ʙᴇғᴏʀᴇ ᴍᴜᴛᴇ!**"),
-                reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("๏ ᴊᴏɪɴ ᴄʜᴀɴɴᴇʟ ๏", url=channel_url)]]),
+                reply_markup=close_button,
             )
             await asyncio.sleep(1)
             return False  # DELETE MESSAGE
